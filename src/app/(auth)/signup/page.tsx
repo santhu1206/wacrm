@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,7 +22,6 @@ export default function SignupPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
-  const supabase = createClient();
 
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,23 +39,36 @@ export default function SignupPage() {
 
     setLoading(true);
 
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
+    try {
+      const res = await fetch("/api/auth/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          password,
           full_name: fullName,
-        },
-      },
-    });
+        }),
+      });
 
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-      return;
+      const payload = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setError(
+          typeof payload.error === "string"
+            ? payload.error
+            : "Signup failed. Please try again.",
+        );
+        setLoading(false);
+        return;
+      }
+
+      setSuccess(true);
+    } catch {
+      setError(
+        "Could not reach the server. Make sure the dev server is running and try again.",
+      );
     }
 
-    setSuccess(true);
     setLoading(false);
   };
 

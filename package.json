@@ -36,7 +36,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "check:supabase": "node scripts/check-supabase-setup.mjs",
+    "audit:schema": "node scripts/audit-schema.mjs",
+    "health:check": "node scripts/health-check.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

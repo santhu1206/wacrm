@@ -23,7 +23,16 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  const { data: { user } } = await supabase.auth.getUser()
+  let user = null
+  try {
+    const { data, error } = await supabase.auth.getUser()
+    if (error) {
+      console.error('[middleware] getUser:', error.message)
+    }
+    user = data.user
+  } catch (err) {
+    console.error('[middleware] getUser threw:', err)
+  }
 
   // Auth pages - redirect to dashboard if already logged in
   if (user && (
@@ -37,7 +46,16 @@ export async function middleware(request: NextRequest) {
   }
 
   // Protected pages - redirect to login if not authenticated
-  const protectedPaths = ['/dashboard', '/inbox', '/contacts', '/pipelines', '/broadcasts', '/automations', '/settings']
+  const protectedPaths = [
+    '/dashboard',
+    '/inbox',
+    '/contacts',
+    '/pipelines',
+    '/broadcasts',
+    '/automations',
+    '/flows',
+    '/settings',
+  ]
   if (!user && protectedPaths.some(path => request.nextUrl.pathname.startsWith(path))) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
