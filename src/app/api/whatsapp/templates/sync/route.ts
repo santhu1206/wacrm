@@ -1,11 +1,17 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import {
+  ForbiddenError,
+  UnauthorizedError,
+  requireRole,
+  toErrorResponse,
+} from '@/lib/auth/account'
 import { decrypt } from '@/lib/whatsapp/encryption'
-import type {
-  MessageTemplateStatus,
-  TemplateButton,
-  TemplateSampleValues,
-} from '@/types'
+import { normalizeStatus } from '@/lib/whatsapp/template-status-normalize'
+import type { TemplateButton, TemplateSampleValues } from '@/types'
+import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import { getT } from '@/lib/i18n/translate'
+
+const t = getT('Api')
 
 /**
  * Sync message templates from Meta → local message_templates table.
@@ -60,27 +66,6 @@ function normalizeCategory(
   if (upper === 'UTILITY') return 'Utility'
   if (upper === 'AUTHENTICATION') return 'Authentication'
   return 'Marketing'
-}
-
-// Meta sometimes returns PENDING_REVIEW where the docs say PENDING; map
-// it through. Anything we don't recognise falls back to PENDING so the
-// row is visible to the user rather than silently dropped.
-function normalizeStatus(meta: string): MessageTemplateStatus {
-  const upper = meta.toUpperCase()
-  if (upper === 'PENDING_REVIEW') return 'PENDING'
-  const allowed: MessageTemplateStatus[] = [
-    'DRAFT',
-    'PENDING',
-    'APPROVED',
-    'REJECTED',
-    'PAUSED',
-    'DISABLED',
-    'IN_APPEAL',
-    'PENDING_DELETION',
-  ]
-  return (allowed as string[]).includes(upper)
-    ? (upper as MessageTemplateStatus)
-    : 'PENDING'
 }
 
 function normalizeQualityScore(
@@ -148,28 +133,26 @@ function extractSampleValues(
 
 export async function POST() {
   try {
-    const supabase = await createClient()
+    // Syncing rewrites the account-wide template catalog, which is
+    // settings-class data: `canEditSettings` and the message_templates
+    // insert/update RLS policies (migration 017) both require 'admin'.
+    // Resolving account_id off the profile only proved membership.
+    const { supabase, accountId, userId } = await requireRole('admin')
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser()
-
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    const limit = checkRateLimit(`whatsapp-admin:${userId}`, RATE_LIMITS.whatsappAdmin)
+    if (!limit.success) return rateLimitResponse(limit)
 
     const { data: config, error: configError } = await supabase
       .from('whatsapp_config')
       .select('*')
-      .eq('user_id', user.id)
+      .eq('account_id', accountId)
       .single()
 
     if (configError || !config) {
       return NextResponse.json(
         {
           error:
-            'WhatsApp not configured. Connect your WhatsApp Business account in Settings first.',
+            t('common.whatsappNotConfiguredConnect'),
         },
         { status: 400 },
       )
@@ -179,7 +162,7 @@ export async function POST() {
       return NextResponse.json(
         {
           error:
-            'WABA (WhatsApp Business Account) ID missing. Re-connect your account in Settings.',
+            t('common.wabaIdMissing'),
         },
         { status: 400 },
       )
@@ -201,7 +184,7 @@ export async function POST() {
       })
 
       if (!metaRes.ok) {
-        let metaErr = `Meta API error: ${metaRes.status}`
+        let metaErr = t('templates.metaApiStatus', { status: metaRes.status })
         try {
           const body = await metaRes.json()
           if (body?.error?.message) metaErr = body.error.message
@@ -242,7 +225,9 @@ export async function POST() {
           : null
 
       const row = {
-        user_id: user.id,
+        // Account tenancy. account_id is NOT NULL on message_templates
+        // post-017, so an INSERT without it errors.
+        account_id: accountId,
         name: t.name,
         category: normalizeCategory(t.category),
         language: t.language,
@@ -259,13 +244,16 @@ export async function POST() {
         updated_at: new Date().toISOString(),
       }
 
-      const { data: existing, error: lookupErr } = await supabase
+      const { data: matches, error: lookupErr } = await supabase
         .from('message_templates')
         .select('id')
-        .eq('user_id', user.id)
+        .eq('account_id', accountId)
         .eq('name', t.name)
         .eq('language', t.language)
-        .maybeSingle()
+        .order('updated_at', { ascending: false })
+        .order('id')
+        .limit(1)
+      const existing = matches?.[0]
 
       if (lookupErr) {
         errors.push({
@@ -293,7 +281,7 @@ export async function POST() {
       } else {
         const { error: insErr } = await supabase
           .from('message_templates')
-          .insert(row)
+          .insert({ ...row, user_id: userId })
         if (insErr) {
           errors.push({
             name: t.name,
@@ -315,11 +303,19 @@ export async function POST() {
       truncated: pageCount >= PAGE_CAP && nextUrl !== null,
     })
   } catch (error) {
+    // Auth failures map to 401/403 rather than being folded into the
+    // generic 500 below, which surfaces `error.message` as a sync failure.
+    if (
+      error instanceof UnauthorizedError ||
+      error instanceof ForbiddenError
+    ) {
+      return toErrorResponse(error)
+    }
     console.error('Error syncing WhatsApp templates:', error)
     return NextResponse.json(
       {
         error:
-          error instanceof Error ? error.message : 'Failed to sync templates',
+          error instanceof Error ? error.message : t('templates.syncFailed'),
       },
       { status: 500 },
     )

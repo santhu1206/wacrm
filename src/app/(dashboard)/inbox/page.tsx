@@ -1,18 +1,46 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { Suspense, useState, useCallback, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { createClient } from "@/lib/supabase/client";
+import {
+  CONVERSATION_SELECT,
+  normalizeConversation,
+} from "@/lib/inbox/conversations";
 import type { Conversation, Message, Contact, ConversationStatus } from "@/types";
 import { useRealtime } from "@/hooks/use-realtime";
 import { ConversationList } from "@/components/inbox/conversation-list";
+import { parseInboxFilter } from "@/lib/inbox/inbox-filters";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
 import { toast } from "sonner";
 import { WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  applyMessageUpdate,
+  applyRealtimeInsert,
+  mergeFetchedPage,
+  prependOlderMessages,
+} from "@/lib/inbox/optimistic-messages";
 
+// Remembers the agent's show/hide choice for the desktop contact panel
+// across reloads and sessions (device-scoped, like the theme prefs).
+const CONTACT_PANEL_STORAGE_KEY = "wacrm:inbox:contact-panel-open";
+
+// `useSearchParams` (the `?c=<id>` deep link below) requires a Suspense
+// boundary or the production build bails to CSR and errors out. Thin
+// wrapper supplies it; the inner component holds all the inbox state.
 export default function InboxPage() {
+  return (
+    <Suspense fallback={null}>
+      <InboxPageInner />
+    </Suspense>
+  );
+}
+
+function InboxPageInner() {
+  const t = useTranslations("Inbox.page");
   const router = useRouter();
   const searchParams = useSearchParams();
   /**
@@ -38,6 +66,36 @@ export default function InboxPage() {
    * once on conversationId-change as usual.
    */
   const [resyncToken, setResyncToken] = useState(0);
+
+  /**
+   * Whether the desktop contact sidebar (tags / deals / notes) is shown.
+   * Defaults to `true` (the historical behaviour) and is restored from
+   * localStorage after mount. We deliberately do NOT read localStorage in
+   * the initializer: the server renders with `true`, so reading a stored
+   * `false` synchronously would produce a hydration mismatch. The effect
+   * below reconciles to the stored value right after mount instead.
+   */
+  const [contactPanelOpen, setContactPanelOpen] = useState(true);
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(CONTACT_PANEL_STORAGE_KEY);
+      if (stored !== null) setContactPanelOpen(stored === "true");
+    } catch {
+      // localStorage can throw in private-browsing / sandboxed contexts.
+    }
+  }, []);
+
+  const handleToggleContactPanel = useCallback(() => {
+    setContactPanelOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(CONTACT_PANEL_STORAGE_KEY, String(next));
+      } catch {
+        // Persistence is best-effort; ignore storage failures.
+      }
+      return next;
+    });
+  }, []);
 
   // Fire the deep-link auto-select exactly once per URL — subsequent
   // list refreshes (realtime, manual refetch) must not snap the user
@@ -84,7 +142,7 @@ export default function InboxPage() {
       const supabase = createClient();
       const { data, error } = await supabase
         .from("conversations")
-        .select("*, contact:contacts(*)")
+        .select(CONVERSATION_SELECT)
         .eq("id", convId)
         .maybeSingle();
       if (error) {
@@ -99,7 +157,7 @@ export default function InboxPage() {
         return;
       }
       if (!data) return;
-      const fetched = data as Conversation;
+      const fetched = normalizeConversation(data);
       setConversations((prev) => {
         const existing = prev.find((c) => c.id === fetched.id);
         if (existing) {
@@ -132,12 +190,27 @@ export default function InboxPage() {
 
       if (!user) return;
 
-      // Table is `whatsapp_config` (singular) — the previous "whatsapp_configs"
-      // query always returned no rows, so the banner always showed "not connected".
+      // whatsapp_config is one-row-per-account post-multi-user, so
+      // the previous `.eq('user_id', user.id)` would miss the row
+      // for any teammate who didn't personally save the config —
+      // the "WhatsApp not connected" banner would show in the
+      // shared inbox even though the admin had it configured.
+      // Resolve account_id via the profile and query by that.
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("account_id")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      const accountId = profile?.account_id as string | undefined;
+      if (!accountId) {
+        setWhatsappConnected(false);
+        return;
+      }
+
       const { data } = await supabase
         .from("whatsapp_config")
         .select("status")
-        .eq("user_id", user.id)
+        .eq("account_id", accountId)
         .maybeSingle();
 
       setWhatsappConnected(data?.status === "connected");
@@ -157,15 +230,7 @@ export default function InboxPage() {
           activeConversation &&
           newMsg.conversation_id === activeConversation.id
         ) {
-          setMessages((prev) => {
-            // Avoid duplicates
-            if (prev.some((m) => m.id === newMsg.id)) return prev;
-            // Replace optimistic message if it exists
-            const withoutOptimistic = prev.filter(
-              (m) => !m.id.startsWith("temp-")
-            );
-            return [...withoutOptimistic, newMsg];
-          });
+          setMessages((prev) => applyRealtimeInsert(prev, newMsg));
         }
 
         // Update conversation list preview. We need to know *synchronously*
@@ -436,8 +501,15 @@ export default function InboxPage() {
   }, [router]);
 
 
-  const handleMessagesLoaded = useCallback((loaded: Message[]) => {
-    setMessages(loaded);
+  const handleMessagesLoaded = useCallback(
+    (loaded: Message[], conversationId: string) => {
+      setMessages((prev) => mergeFetchedPage(prev, loaded, conversationId));
+    },
+    [],
+  );
+
+  const handleOlderMessagesLoaded = useCallback((older: Message[]) => {
+    setMessages((prev) => prependOlderMessages(prev, older));
   }, []);
 
   const handleNewMessage = useCallback((msg: Message) => {
@@ -449,9 +521,7 @@ export default function InboxPage() {
 
   const handleUpdateMessage = useCallback(
     (id: string, updates: Partial<Message>) => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === id ? { ...m, ...updates } : m))
-      );
+      setMessages((prev) => applyMessageUpdate(prev, id, updates));
     },
     []
   );
@@ -503,7 +573,7 @@ export default function InboxPage() {
         <div className="flex shrink-0 items-center justify-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2">
           <WifiOff className="h-4 w-4 text-amber-400" />
           <p className="text-xs text-amber-400">
-            WhatsApp® is not connected. Go to Settings to connect your account.
+            {t("whatsappNotConnected")}
           </p>
         </div>
       )}
@@ -514,7 +584,7 @@ export default function InboxPage() {
             thread can occupy the full width. Always visible on lg+. */}
         <div
           className={cn(
-            "flex h-full flex-1 lg:flex-none",
+            "flex h-full min-w-0 flex-1 lg:flex-none",
             hasActiveConv ? "hidden lg:flex" : "flex",
           )}
         >
@@ -524,16 +594,23 @@ export default function InboxPage() {
             conversations={conversations}
             onConversationsLoaded={handleConversationsLoaded}
             resyncToken={resyncToken}
+            initialFilter={parseInboxFilter(searchParams.get("filter"))}
           />
         </div>
 
         {/* Center panel: Message thread.
             Hidden on mobile when no conversation is selected so the
             list can occupy the full width. Always visible on lg+
-            (shows its own empty-state if no thread is picked yet). */}
+            (shows its own empty-state if no thread is picked yet).
+
+            `min-w-0` is load-bearing: without it, a single wide piece
+            of content inside the thread (long quote preview, very
+            long URL in a message body) forces the flex child past
+            its share and pushes the contact-sidebar panel off-screen
+            on the right. Issue #165. */}
         <div
           className={cn(
-            "flex h-full flex-1 lg:flex",
+            "flex h-full min-w-0 flex-1 lg:flex",
             hasActiveConv ? "flex" : "hidden lg:flex",
           )}
         >
@@ -542,6 +619,7 @@ export default function InboxPage() {
             contact={activeContact}
             messages={messages}
             onMessagesLoaded={handleMessagesLoaded}
+            onOlderMessagesLoaded={handleOlderMessagesLoaded}
             onNewMessage={handleNewMessage}
             onUpdateMessage={handleUpdateMessage}
             onStatusChange={handleStatusChange}
@@ -549,13 +627,20 @@ export default function InboxPage() {
             onBack={handleCloseConversation}
             resyncToken={resyncToken}
             onRefresh={handleManualRefresh}
+            contactPanelOpen={contactPanelOpen}
+            onToggleContactPanel={handleToggleContactPanel}
           />
         </div>
 
-        {/* Right panel: Contact sidebar — desktop only. */}
-        <div className="hidden lg:block">
-          <ContactSidebar contact={activeContact} />
-        </div>
+        {/* Right panel: Contact sidebar — desktop only, and only when the
+            agent hasn't collapsed it via the thread-header toggle (#258).
+            On mobile it's always hidden (the `lg:block` below), so the
+            toggle — which is itself desktop-only — never affects it. */}
+        {contactPanelOpen && (
+          <div className="hidden lg:block">
+            <ContactSidebar contact={activeContact} />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -47,6 +47,9 @@ next-env.d.ts
 dist/
 .cache/
 
+# supabase
+supabase/.temp/
+
 # IDE / OS
 .idea/
 .vscode/
