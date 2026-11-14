@@ -55,10 +55,6 @@ function LoginPageInner() {
   const [loading, setLoading] = useState(false);
   const supabase = createClient();
 
-  useEffect(() => {
-    const authError = new URLSearchParams(window.location.search).get("error");
-    if (authError) setError(decodeURIComponent(authError));
-  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
