@@ -89,26 +89,33 @@ const columnChecks = [
   { table: "message_templates", col: "sample_values", migration: "014" },
 ];
 
-for (const { table, col, migration } of columnChecks) {
-  const res = await rest(`${table}?select=${col}&limit=0`);
-  if (res.ok) line(report.columns, "ok", `${table}.${col} (${migration})`);
-  else {
-    const b = await res.json().catch(() => ({}));
-    line(report.columns, "fail", `${table}.${col}: ${b.message || res.status}`);
+if (url) {
+  for (const { table, col, migration } of columnChecks) {
+    try {
+      const res = await rest(`${table}?select=${col}&limit=0`);
+      if (res.ok) line(report.columns, "ok", `${table}.${col} (${migration})`);
+      else {
+        const b = await res.json().catch(() => ({}));
+        line(report.columns, "fail", `${table}.${col}: ${b.message || res.status}`);
+      }
+    } catch (e) {
+      line(report.columns, "fail", `${table}.${col}: ${e.message}`);
+    }
   }
-}
 
-// --- RPC (service role) ---
-const rpcChecks = [
-  { name: "increment_automation_execution_count", fakeId: "00000000-0000-0000-0000-000000000001" },
-  { name: "increment_flow_execution_count", fakeId: "00000000-0000-0000-0000-000000000001" },
-];
-
-for (const { name, fakeId } of rpcChecks) {
-  const res = await rpc(name, name.includes("automation") ? { p_automation_id: fakeId } : { p_flow_id: fakeId });
-  if (res.status === 204 || res.ok) line(report.rpc, "ok", `rpc/${name} callable`);
-  else if (res.status === 404) line(report.rpc, "fail", `rpc/${name} missing — run migration 007/012`);
-  else line(report.rpc, "ok", `rpc/${name} exists (HTTP ${res.status}, no row updated is OK)`);
+  for (const { name, fakeId } of rpcChecks) {
+    try {
+      const res = await rpc(name, name.includes("automation") ? { p_automation_id: fakeId } : { p_flow_id: fakeId });
+      if (res.status === 204 || res.ok) line(report.rpc, "ok", `rpc/${name} callable`);
+      else if (res.status === 404) line(report.rpc, "fail", `rpc/${name} missing — run migration 007/012`);
+      else line(report.rpc, "ok", `rpc/${name} exists (HTTP ${res.status}, no row updated is OK)`);
+    } catch (e) {
+      line(report.rpc, "fail", `rpc/${name}: ${e.message}`);
+    }
+  }
+} else {
+  line(report.columns, "warn", "NEXT_PUBLIC_SUPABASE_URL missing, skipping direct REST checks");
+  line(report.rpc, "warn", "NEXT_PUBLIC_SUPABASE_URL missing, skipping direct RPC checks");
 }
 
 // --- Pages (no auth) ---
