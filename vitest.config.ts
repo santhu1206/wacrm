@@ -1,9 +1,15 @@
 import { defineConfig } from "vitest/config";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   resolve: {
-    tsconfigPaths: true,
-    alias: { "@app-messages": new URL("./messages/en.json", import.meta.url).pathname },
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+      "@app-messages": path.resolve(__dirname, "./messages/en.json"),
+    },
   },
   test: {
     environment: "node",
