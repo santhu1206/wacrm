@@ -6,22 +6,9 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-const MIGRATIONS = [
-  "001_initial_schema.sql",
-  "002_pipelines_enhancements.sql",
-  "003_broadcast_recipient_wamid.sql",
-  "004_contact_delete_set_null.sql",
-  "005_broadcast_counts_incremental.sql",
-  "006_automations.sql",
-  "007_automations_increment_counter.sql",
-  "008_profile_avatars_storage.sql",
-  "009_message_actions.sql",
-  "010_flows.sql",
-  "011_profile_beta_features.sql",
-  "012_flows_increment_counter.sql",
-  "013_whatsapp_config_phone_number_id_unique.sql",
-  "014_message_templates_meta_integration.sql",
-];
+const MIGRATIONS = readdirSync(resolve(process.cwd(), "supabase/migrations"))
+  .filter((f) => f.endsWith(".sql"))
+  .sort();
 
 /** Tables the app queries via supabase.from(...) */
 const REQUIRED_TABLES = [
@@ -46,14 +33,28 @@ const REQUIRED_TABLES = [
   { table: "automation_logs", migration: "006", module: "Automations" },
   { table: "automation_pending_executions", migration: "006", module: "Automations cron" },
   { table: "message_reactions", migration: "009", module: "Inbox reactions" },
-  { table: "flows", migration: "010", module: "Flows (beta)" },
+  { table: "flows", migration: "010", module: "Flows" },
   { table: "flow_nodes", migration: "010", module: "Flows" },
   { table: "flow_runs", migration: "010", module: "Flows" },
   { table: "flow_run_events", migration: "010", module: "Flows" },
+  { table: "accounts", migration: "017", module: "Multi-user accounts & sharing" },
+  { table: "account_invitations", migration: "017", module: "Team invitations" },
+  { table: "member_presence", migration: "024", module: "Agent presence tracking" },
+  { table: "api_keys", migration: "026", module: "Public REST API keys" },
+  { table: "notifications", migration: "027", module: "In-app & browser notifications" },
+  { table: "webhook_endpoints", migration: "028", module: "Outbound webhooks" },
+  { table: "ai_configs", migration: "029", module: "AI assistant settings" },
+  { table: "ai_knowledge_documents", migration: "030", module: "AI knowledge base" },
+  { table: "ai_knowledge_chunks", migration: "030", module: "AI semantic / full-text chunks" },
+  { table: "ai_usage_log", migration: "033", module: "AI token spend tracking" },
+  { table: "quick_replies", migration: "035", module: "Interactive quick replies" },
+  { table: "pending_message_statuses", migration: "054", module: "Webhook delivery order buffer" },
 ];
 
 const STORAGE_BUCKETS = [
   { bucket: "avatars", migration: "008", module: "Profile avatars" },
+  { bucket: "flow-media", migration: "016", module: "Flow media attachments" },
+  { bucket: "chat-media", migration: "023", module: "Inbound chat media mirror" },
 ];
 
 function loadEnvLocal() {
